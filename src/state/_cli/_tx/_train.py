@@ -340,7 +340,9 @@ def run_tx_train(cfg: DictConfig):
         pert_encoder_weight_key = "pert_encoder.0.weight"
         if pert_encoder_weight_key in checkpoint_state:
             checkpoint_pert_dim = checkpoint_state[pert_encoder_weight_key].shape[1]
-            if checkpoint_pert_dim != model.pert_dim:
+
+            # if the cell embedding dim doesn't match, or if it was HVGs, rebuild for transfer learning
+            if checkpoint_pert_dim != model.pert_dim or cfg["data"]["kwargs"]["embed_key"] == "X_hvg":
                 print(
                     f"pert_encoder input dimension mismatch: model.pert_dim = {model.pert_dim} but checkpoint expects {checkpoint_pert_dim}. Overriding model's pert_dim and rebuilding pert_encoder."
                 )

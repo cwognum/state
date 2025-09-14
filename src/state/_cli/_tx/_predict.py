@@ -384,7 +384,10 @@ def run_tx_predict(args: ap.ArgumentParser):
             )
 
     # Save the AnnData objects
-    results_dir = os.path.join(args.output_dir, "eval_" + os.path.basename(args.checkpoint))
+    if args.eval_train_data:
+        results_dir = os.path.join(args.output_dir, "eval_train_" + os.path.basename(args.checkpoint))
+    else:
+        results_dir = os.path.join(args.output_dir, "eval_" + os.path.basename(args.checkpoint))
     os.makedirs(results_dir, exist_ok=True)
     adata_pred_path = os.path.join(results_dir, "adata_pred.h5ad")
     adata_real_path = os.path.join(results_dir, "adata_real.h5ad")

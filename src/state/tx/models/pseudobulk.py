@@ -129,7 +129,10 @@ class PseudobulkPerturbationModel(PerturbationModel):
                 + ("HVG subset" if output_space == "gene" else "all genes")
                 + ")"
             )
-            self.gene_decoder = FinetuneVCICountsDecoder(genes=gene_names)
+            self.gene_decoder = FinetuneVCICountsDecoder(
+                genes=gene_names,
+                checkpoint=kwargs.get("vci_checkpoint", None),
+            )
 
         print(self)
 

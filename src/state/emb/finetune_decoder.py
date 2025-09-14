@@ -1,6 +1,7 @@
 import logging
 import torch
 from torch import nn
+from omegaconf import OmegaConf
 
 from vci.nn.model import StateEmbeddingModel
 from vci.train.trainer import get_embeddings
@@ -10,7 +11,7 @@ log = logging.getLogger(__name__)
 
 
 class Finetune:
-    def __init__(self, cfg, learning_rate=1e-4):
+    def __init__(self, cfg=None, learning_rate=1e-4):
         """
         Initialize the Finetune class for fine-tuning the binary decoder of a pre-trained model.
 
@@ -29,47 +30,71 @@ class Finetune:
         self.cached_gene_embeddings = {}
         self.device = None
 
-    def load_model(self, checkpoint):
+    def load_model(self, checkpoint: str):
         """
-        Load a pre-trained model from a checkpoint and prepare it for fine-tuning.
-
-        Parameters:
-        -----------
-        checkpoint : str
-            Path to the checkpoint file
+        Load a pre-trained SE model from a single checkpoint path and prepare
+        it for use. Mirrors the transform/inference loader behavior: extract
+        config and embeddings from the checkpoint if present, otherwise fallbacks.
         """
         if self.model:
             raise ValueError("Model already initialized")
 
-        # Import locally to avoid circular imports
+        # Resolve configuration: prefer embedded cfg in checkpoint
+        cfg_to_use = self._vci_conf
+        if cfg_to_use is None:
+            try:
+                ckpt = torch.load(checkpoint, map_location="cpu", weights_only=False)
+                if isinstance(ckpt, dict) and "cfg_yaml" in ckpt:
+                    cfg_to_use = OmegaConf.create(ckpt["cfg_yaml"])  # type: ignore
+                elif isinstance(ckpt, dict) and "hyper_parameters" in ckpt:
+                    hp = ckpt.get("hyper_parameters", {}) or {}
+                    # Some checkpoints may have a cfg-like structure in hyper_parameters
+                    if isinstance(hp, dict) and len(hp) > 0:
+                        try:
+                            cfg_to_use = OmegaConf.create(hp["cfg"]) if "cfg" in hp else OmegaConf.create(hp)
+                        except Exception:
+                            cfg_to_use = OmegaConf.create(hp)
+            except Exception as e:
+                log.warning(f"Could not extract config from checkpoint: {e}")
+        if cfg_to_use is None:
+            raise ValueError("No config found in checkpoint and no override provided. Provide SE cfg or a full checkpoint.")
 
-        # Load and initialize model for eval
-        self.model = StateEmbeddingModel.load_from_checkpoint(checkpoint, strict=False)
+        self._vci_conf = cfg_to_use
 
-        # Ensure model uses the provided config, not the stored one
-        if self._vci_conf is not None:
-            self.model.update_config(self._vci_conf)
-
+        # Load model; allow passing cfg to constructor like inference
+        self.model = StateEmbeddingModel.load_from_checkpoint(
+            checkpoint, dropout=0.0, strict=False, cfg=self._vci_conf
+        )
         self.device = self.model.device
 
-        # Load protein embeddings
-        all_pe = get_embeddings(self._vci_conf)
+        # Try to extract packaged protein embeddings from checkpoint
+        packaged_pe = None
+        try:
+            ckpt2 = torch.load(checkpoint, map_location="cpu", weights_only=False)
+            if isinstance(ckpt2, dict) and "protein_embeds_dict" in ckpt2:
+                packaged_pe = ckpt2["protein_embeds_dict"]
+        except Exception:
+            pass
+
+        # Resolve protein embeddings for pe_embedding weights
+        all_pe = packaged_pe or get_embeddings(self._vci_conf)
+        if isinstance(all_pe, dict):
+            all_pe = torch.vstack(list(all_pe.values()))
         all_pe.requires_grad = False
         self.model.pe_embedding = nn.Embedding.from_pretrained(all_pe)
         self.model.pe_embedding.to(self.device)
 
-        # Load protein embeddings
-        self.protein_embeds = torch.load(get_embedding_cfg(self._vci_conf).all_embeddings)
+        # Keep a mapping from gene name -> protein embedding vector
+        self.protein_embeds = packaged_pe
+        if self.protein_embeds is None:
+            # Fallback to configured path
+            self.protein_embeds = torch.load(get_embedding_cfg(self._vci_conf).all_embeddings, weights_only=False)
 
-        # Freeze all parameters
-        for param in self.model.parameters():
-            param.requires_grad = False
-
-        # Enable gradients only for binary decoder
-        for param in self.model.binary_decoder.parameters():
-            param.requires_grad = False
-
-        # Ensure the binary decoder is in training mode so gradients are enabled.
+        # Freeze SE model and decoder
+        for p in self.model.parameters():
+            p.requires_grad = False
+        for p in self.model.binary_decoder.parameters():
+            p.requires_grad = False
         self.model.binary_decoder.eval()
 
     def _auto_detect_gene_column(self, adata):
@@ -134,16 +159,23 @@ class Finetune:
         if cache_key in self.cached_gene_embeddings:
             return self.cached_gene_embeddings[cache_key]
 
-        # Strict validation: ensure all genes are present in pretrained all_embeddings
+        # Compute gene embeddings; fallback to zero vectors for missing genes.
         missing = [g for g in genes if g not in self.protein_embeds]
         if len(missing) > 0:
-            raise ValueError(
-                f"Finetune.get_gene_embedding: {len(missing)} gene(s) not found in pretrained all_embeddings: "
-                f"{missing[:10]}{' ...' if len(missing) > 10 else ''}."
+            try:
+                embed_size = next(iter(self.protein_embeds.values())).shape[-1]
+            except Exception:
+                embed_size = 5120
+            # Log once per call to aid debugging
+            log.warning(
+                f"Finetune.get_gene_embedding: {len(missing)} gene(s) missing from pretrained embeddings; using zeros as placeholders. "
+                f"First missing: {missing[:10]}{' ...' if len(missing) > 10 else ''}."
             )
 
-        # Compute gene embeddings
-        protein_embeds = [self.protein_embeds[x] for x in genes]
+        protein_embeds = [
+            self.protein_embeds[x] if x in self.protein_embeds else torch.zeros(embed_size)
+            for x in genes
+        ]
         protein_embeds = torch.stack(protein_embeds).to(self.device)
         gene_embeds = self.model.gene_embedding_layer(protein_embeds)
 
@@ -171,7 +203,7 @@ class Finetune:
         # Check if RDA is enabled.
         use_rda = getattr(self.model.cfg.model, "rda", False)
         if use_rda and read_depth is None:
-            read_depth = 1000.0
+            read_depth = 4.0
 
         # Retrieve gene embeddings (cached if available).
         gene_embeds = self.get_gene_embedding(genes)

@@ -12,7 +12,8 @@ logger = logging.getLogger(__name__)
 class FinetuneVCICountsDecoder(nn.Module):
     def __init__(
         self,
-        genes,
+        genes=None,
+        adata=None,
         # model_loc="/large_storage/ctc/userspace/aadduri/vci/checkpoint/rda_tabular_counts_2048_new/step=950000.ckpt",
         # config="/large_storage/ctc/userspace/aadduri/vci/checkpoint/rda_tabular_counts_2048_new/tahoe_config.yaml",
         model_loc="/home/aadduri/vci_pretrain/vci_1.4.2.ckpt",
@@ -24,12 +25,22 @@ class FinetuneVCICountsDecoder(nn.Module):
         basal_residual=False,
     ):
         super().__init__()
-        self.genes = genes
+        # Initialize finetune helper and model
         self.model_loc = model_loc
         self.config = config
         self.finetune = Finetune(OmegaConf.load(self.config))
         self.finetune.load_model(self.model_loc)
-        self.read_depth = nn.Parameter(torch.tensor(read_depth, dtype=torch.float), requires_grad=False)
+        # Resolve genes: prefer explicit list; else infer from anndata if provided
+        if genes is None and adata is not None:
+            try:
+                genes = self.finetune.genes_from_adata(adata)
+            except Exception as e:
+                raise ValueError(f"Failed to infer genes from AnnData: {e}")
+        if genes is None:
+            raise ValueError("FinetuneVCICountsDecoder requires 'genes' or 'adata' to derive gene names")
+        self.genes = genes
+        # Keep read_depth as a learnable parameter so decoded counts can adapt
+        self.read_depth = nn.Parameter(torch.tensor(read_depth, dtype=torch.float), requires_grad=True)
         self.basal_residual = basal_residual
 
         # layers = [
@@ -59,6 +70,27 @@ class FinetuneVCICountsDecoder(nn.Module):
         self.binary_decoder = self.finetune.model.binary_decoder
         for param in self.binary_decoder.parameters():
             param.requires_grad = False
+
+        # Validate that all requested genes exist in the pretrained checkpoint's embeddings
+        pe = getattr(self.finetune, "protein_embeds", {})
+        present = [g for g in self.genes if g in pe]
+        missing = [g for g in self.genes if g not in pe]
+        if len(missing) > 0:
+            total_req = len(self.genes)
+            total_pe = len(pe) if hasattr(pe, "__len__") else -1
+            found = total_req - len(missing)
+            miss_pct = (len(missing) / total_req) if total_req > 0 else 1.0
+            logger.error(
+                f"FinetuneVCICountsDecoder gene check: requested={total_req}, found={found}, missing={len(missing)} ({miss_pct:.1%}), all_embeddings_size={total_pe}"
+            )
+            logger.error(
+                f"Examples missing: {missing[:10]}{' ...' if len(missing) > 10 else ''}; examples present: {present[:10]}{' ...' if len(present) > 10 else ''}"
+            )
+            raise ValueError(
+                f"FinetuneVCICountsDecoder: {len(missing)} gene(s) not found in pretrained all_embeddings. "
+                f"Requested={total_req}, Found={found}, Missing={len(missing)} ({miss_pct:.1%}). "
+                f"First missing: {missing[:10]}{' ...' if len(missing) > 10 else ''}."
+            )
 
     def gene_dim(self):
         return len(self.genes)
@@ -113,8 +145,10 @@ class FinetuneVCICountsDecoder(nn.Module):
         decoded_gene = decoded_gene + self.gene_decoder_proj(decoded_gene)
         # decoded_gene = torch.nn.functional.relu(decoded_gene)
 
-        # # normalize the sum of decoded_gene to be read depth
-        # decoded_gene = decoded_gene / decoded_gene.sum(dim=2, keepdim=True) * self.read_depth
+        # Normalize the sum of decoded_gene to be read depth (learnable)
+        # Guard against divide-by-zero by adding small epsilon
+        eps = 1e-6
+        decoded_gene = decoded_gene / (decoded_gene.sum(dim=2, keepdim=True) + eps) * self.read_depth
 
         # decoded_gene = self.gene_lora(decoded_gene)
         # TODO: fix this to work with basal counts

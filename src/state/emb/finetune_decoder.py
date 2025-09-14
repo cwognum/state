@@ -72,6 +72,47 @@ class Finetune:
         # Ensure the binary decoder is in training mode so gradients are enabled.
         self.model.binary_decoder.eval()
 
+    def _auto_detect_gene_column(self, adata):
+        """Auto-detect the gene column with highest overlap with protein embeddings.
+
+        Returns None to indicate var.index, or a string column name in var.
+        """
+        if self.protein_embeds is None:
+            log.warning("No protein embeddings available for auto-detection, using index")
+            return None
+
+        protein_genes = set(self.protein_embeds.keys())
+        best_column = None
+        best_overlap = 0
+
+        # Check index first
+        index_genes = set(getattr(adata.var, "index", []))
+        overlap = len(protein_genes.intersection(index_genes))
+        if overlap > best_overlap:
+            best_overlap = overlap
+            best_column = None  # None means use index
+
+        # Check all columns in var
+        for col in adata.var.columns:
+            try:
+                col_vals = adata.var[col].dropna().astype(str)
+            except Exception:
+                continue
+            col_genes = set(col_vals)
+            overlap = len(protein_genes.intersection(col_genes))
+            if overlap > best_overlap:
+                best_overlap = overlap
+                best_column = col
+
+        return best_column
+
+    def genes_from_adata(self, adata):
+        """Return list of gene names from AnnData using auto-detected column/index."""
+        col = self._auto_detect_gene_column(adata)
+        if col is None:
+            return list(map(str, adata.var.index.values))
+        return list(adata.var[col].astype(str).values)
+
     def get_gene_embedding(self, genes):
         """
         Get embeddings for a list of genes, with caching to avoid recomputation.
@@ -93,8 +134,16 @@ class Finetune:
         if cache_key in self.cached_gene_embeddings:
             return self.cached_gene_embeddings[cache_key]
 
+        # Strict validation: ensure all genes are present in pretrained all_embeddings
+        missing = [g for g in genes if g not in self.protein_embeds]
+        if len(missing) > 0:
+            raise ValueError(
+                f"Finetune.get_gene_embedding: {len(missing)} gene(s) not found in pretrained all_embeddings: "
+                f"{missing[:10]}{' ...' if len(missing) > 10 else ''}."
+            )
+
         # Compute gene embeddings
-        protein_embeds = [self.protein_embeds[x] if x in self.protein_embeds else torch.zeros(5120) for x in genes]
+        protein_embeds = [self.protein_embeds[x] for x in genes]
         protein_embeds = torch.stack(protein_embeds).to(self.device)
         gene_embeds = self.model.gene_embedding_layer(protein_embeds)
 

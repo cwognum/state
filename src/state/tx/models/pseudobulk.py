@@ -115,33 +115,21 @@ class PseudobulkPerturbationModel(PerturbationModel):
 
         control_pert = kwargs.get("control_pert", "non-targeting")
         if kwargs.get("finetune_vci_decoder", False):
-            gene_names = []
+            # Prefer the gene names supplied by the data module (aligned to training output)
+            gene_names = self.gene_names
+            if gene_names is None:
+                raise ValueError(
+                    "finetune_vci_decoder=True but model.gene_names is None. "
+                    "Please provide gene_names via data module var_dims."
+                )
 
-            if output_space == "gene":
-                # hvg's but for which dataset?
-                if "DMSO_TF" in control_pert:
-                    gene_names = np.load(
-                        "/large_storage/ctc/userspace/aadduri/datasets/tahoe_19k_to_2k_names.npy", allow_pickle=True
-                    )
-                elif "non-targeting" in control_pert:
-                    temp = ad.read_h5ad("/large_storage/ctc/userspace/aadduri/datasets/hvg/replogle/jurkat.h5")
-                    gene_names = temp.var.index.values
-            else:
-                assert output_space == "all"
-                if "DMSO_TF" in control_pert:
-                    gene_names = np.load(
-                        "/large_storage/ctc/userspace/aadduri/datasets/tahoe_19k_names.npy", allow_pickle=True
-                    )
-                elif "non-targeting" in control_pert:
-                    # temp = ad.read_h5ad('/scratch/ctc/ML/vci/paper_replogle/jurkat.h5')
-                    # gene_names = temp.var.index.values
-                    temp = ad.read_h5ad("/large_storage/ctc/userspace/aadduri/cross_dataset/replogle/jurkat.h5")
-                    gene_names = temp.var.index.values
-
-            self.gene_decoder = FinetuneVCICountsDecoder(
-                genes=gene_names,
-                # latent_dim=self.output_dim + (self.batch_dim or 0),
+            n_genes = len(gene_names)
+            logger.info(
+                f"Initializing FinetuneVCICountsDecoder with {n_genes} genes (output_space={output_space}; "
+                + ("HVG subset" if output_space == "gene" else "all genes")
+                + ")"
             )
+            self.gene_decoder = FinetuneVCICountsDecoder(genes=gene_names)
 
         print(self)
 

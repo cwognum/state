@@ -27,6 +27,7 @@ class FinetuneVCICountsDecoder(nn.Module):
         hidden_dim: int = 512,
         dropout: float = 0.1,
         basal_residual: bool = False,
+        train_binary_decoder: bool = True,
     ):
         super().__init__()
         # Initialize finetune helper and model from a single checkpoint
@@ -34,7 +35,7 @@ class FinetuneVCICountsDecoder(nn.Module):
             raise ValueError(
                 "FinetuneVCICountsDecoder requires a VCI/SE config. Set kwargs.vci_config or env STATE_VCI_CONFIG."
             )
-        self.finetune = Finetune(cfg=OmegaConf.load(config))
+        self.finetune = Finetune(cfg=OmegaConf.load(config), train_binary_decoder=train_binary_decoder)
         self.finetune.load_model(checkpoint)
         # Resolve genes: prefer explicit list; else infer from anndata if provided
         if genes is None and adata is not None:
@@ -50,12 +51,6 @@ class FinetuneVCICountsDecoder(nn.Module):
         self.basal_residual = basal_residual
         self.ds_emb_dim = int(ds_emb_dim) if ds_emb_dim is not None else 0
         self.input_total_dim = int(latent_dim)
-
-        # layers = [
-        #     nn.Linear(latent_dim, hidden_dims[0]),
-        # ]
-
-        # self.gene_lora = nn.Sequential(*layers)
 
         self.latent_decoder = nn.Sequential(
             nn.Linear(latent_dim, hidden_dim),
@@ -80,9 +75,7 @@ class FinetuneVCICountsDecoder(nn.Module):
             nn.Linear(128, len(self.genes)),
         )
 
-        self.binary_decoder = self.finetune.model.binary_decoder
-        for param in self.binary_decoder.parameters():
-            param.requires_grad = False
+        self.binary_decoder = self.finetune.model.binary_decoder # type: ignore
 
         # Validate that all requested genes exist in the pretrained checkpoint's embeddings
         pe = getattr(self.finetune, "protein_embeds", {})

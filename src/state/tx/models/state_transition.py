@@ -5,6 +5,7 @@ import anndata as ad
 import numpy as np
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
 from geomloss import SamplesLoss
 from typing import Tuple
@@ -195,6 +196,46 @@ class StateTransitionPerturbationModel(PerturbationModel):
             )
             self.batch_dim = batch_dim
 
+        # Optional batch predictor ablation: learns a single batch token added to every position,
+        # and adds an auxiliary per-token batch classification head + CE loss.
+        self.batch_predictor = bool(kwargs.get("batch_predictor", False))
+        # If batch_encoder is enabled, disable batch_predictor per request
+        if self.batch_encoder is not None and self.batch_predictor:
+            logger.warning(
+                "Both model.kwargs.batch_encoder and model.kwargs.batch_predictor are True. "
+                "Disabling batch_predictor and proceeding with batch_encoder."
+            )
+            self.batch_predictor = False
+            try:
+                # Keep hparams in sync if available
+                self.hparams["batch_predictor"] = False  # type: ignore[index]
+            except Exception:
+                pass
+
+        self.batch_predictor_weight = float(kwargs.get("batch_predictor_weight", 0.1))
+        self.batch_predictor_num_classes: Optional[int] = batch_dim if self.batch_predictor else None
+        if self.batch_predictor:
+            if self.batch_predictor_num_classes is None:
+                raise ValueError(
+                    "batch_predictor=True requires a valid `batch_dim` (number of batch classes)."
+                )
+            # A single learnable batch token that is added to each position
+            self.batch_token = nn.Parameter(torch.randn(1, 1, self.hidden_dim))
+            # Simple per-token classifier from transformer hidden to batch classes
+            self.batch_classifier = build_mlp(
+                in_dim=self.hidden_dim,
+                out_dim=self.batch_predictor_num_classes,
+                hidden_dim=self.hidden_dim,
+                n_layers=4,
+                dropout=self.dropout,
+                activation=self.activation_class,
+            )
+        else:
+            self.batch_token = None
+            self.batch_classifier = None
+        # Internal cache for last token features (B, S, H) from transformer for aux loss
+        self._token_features: Optional[torch.Tensor] = None
+
         # if the model is outputting to counts space, apply relu
         # otherwise its in embedding space and we don't want to
         is_gene_space = kwargs["embed_key"] == "X_hvg" or kwargs["embed_key"] is None
@@ -362,6 +403,10 @@ class StateTransitionPerturbationModel(PerturbationModel):
             # Get batch embeddings and add to sequence input
             batch_embeddings = self.batch_encoder(batch_indices.long())  # Shape: [B, S, hidden_dim]
             seq_input = seq_input + batch_embeddings
+        elif self.batch_predictor and self.batch_token is not None:
+            # Add a single learnable batch token to every position (no label leakage)
+            bs, sl, _ = seq_input.shape
+            seq_input = seq_input + self.batch_token.expand(bs, sl, -1)
 
         confidence_pred = None
         if self.confidence_token is not None:
@@ -391,6 +436,9 @@ class StateTransitionPerturbationModel(PerturbationModel):
             res_pred, confidence_pred = self.confidence_token.extract_confidence_prediction(transformer_output)
         else:
             res_pred = transformer_output
+
+        # Cache token features for auxiliary batch prediction loss (B, S, H)
+        self._token_features = res_pred
 
         # add to basal if predicting residual
         if self.predict_residual and self.output_space == "all":
@@ -449,6 +497,32 @@ class StateTransitionPerturbationModel(PerturbationModel):
         # Process decoder if available
         decoder_loss = None
         total_loss = main_loss
+
+        # Auxiliary batch prediction loss (per token), if enabled
+        if self.batch_predictor and self._token_features is not None and self.batch_classifier is not None:
+            token_feats = self._token_features  # [B, S, H]
+            logits = self.batch_classifier(token_feats)  # [B, S, C]
+
+            batch_labels = batch["batch"]
+            C = logits.size(-1)
+
+            # Normalize labels to integer indices [B, S]
+            if batch_labels.dim() > 1 and batch_labels.size(-1) == C:
+                # one-hot to indices
+                if padded:
+                    target_idx = batch_labels.reshape(-1, self.cell_sentence_len, C).argmax(-1)
+                else:
+                    target_idx = batch_labels.reshape(1, -1, C).argmax(-1)
+            else:
+                # integer labels already
+                if padded:
+                    target_idx = batch_labels.reshape(-1, self.cell_sentence_len)
+                else:
+                    target_idx = batch_labels.reshape(1, -1)
+
+            ce_loss = F.cross_entropy(logits.reshape(-1, C), target_idx.reshape(-1).long())
+            self.log("train/batch_ce_loss", ce_loss)
+            total_loss = total_loss + self.batch_predictor_weight * ce_loss
 
         if self.gene_decoder is not None and "pert_cell_counts" in batch:
             gene_targets = batch["pert_cell_counts"]
@@ -538,6 +612,24 @@ class StateTransitionPerturbationModel(PerturbationModel):
             energy_component = self.loss_fn.energy_loss(pred, target).mean()
             self.log("val/sinkhorn_loss", sinkhorn_component)
             self.log("val/energy_loss", energy_component)
+
+        # Auxiliary batch prediction loss (per token), if enabled
+        if self.batch_predictor and self._token_features is not None and self.batch_classifier is not None:
+            token_feats = self._token_features  # [B, S, H]
+            logits = self.batch_classifier(token_feats)  # [B, S, C]
+
+            batch_labels = batch["batch"]
+            C = logits.size(-1)
+
+            # Normalize labels to integer indices [B, S]
+            if batch_labels.dim() > 1 and batch_labels.size(-1) == C:
+                target_idx = batch_labels.reshape(-1, self.cell_sentence_len, C).argmax(-1)
+            else:
+                target_idx = batch_labels.reshape(-1, self.cell_sentence_len)
+
+            ce_loss = F.cross_entropy(logits.reshape(-1, C), target_idx.reshape(-1).long())
+            self.log("val/batch_ce_loss", ce_loss)
+            loss = loss + self.batch_predictor_weight * ce_loss
 
         if self.gene_decoder is not None and "pert_cell_counts" in batch:
             gene_targets = batch["pert_cell_counts"]

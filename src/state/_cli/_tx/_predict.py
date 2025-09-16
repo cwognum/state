@@ -175,6 +175,10 @@ def run_tx_predict(args: ap.ArgumentParser):
         from ...tx.models.decoder_only import DecoderOnlyPerturbationModel
 
         ModelClass = DecoderOnlyPerturbationModel
+    elif model_class_name.lower() == "pseudobulk":
+        from ...tx.models.pseudobulk import PseudobulkPerturbationModel
+
+        ModelClass = PseudobulkPerturbationModel
     else:
         raise ValueError(f"Unknown model class: {model_class_name}")
 

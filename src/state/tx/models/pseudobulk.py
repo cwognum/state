@@ -136,6 +136,74 @@ class PseudobulkPerturbationModel(PerturbationModel):
 
         print(self)
 
+    def _decoder_in_features(self) -> Optional[int]:
+        """
+        Best-effort inspection of the decoder's expected input dimensionality.
+        Returns None if it cannot be determined reliably.
+        """
+        gd = self.gene_decoder
+        if gd is None:
+            return None
+        # LatentToGeneDecoder (non-residual): has .decoder (Sequential) starting with Linear
+        if hasattr(gd, "decoder") and isinstance(getattr(gd, "decoder"), nn.Sequential):
+            seq = gd.decoder
+            for m in seq:
+                if isinstance(m, nn.Linear):
+                    return m.in_features
+            return None
+        # LatentToGeneDecoder (residual): has .blocks (ModuleList) of Sequentials, first starts with Linear
+        if hasattr(gd, "blocks"):
+            blocks = getattr(gd, "blocks")
+            if len(blocks) > 0 and isinstance(blocks[0], nn.Sequential) and isinstance(blocks[0][0], nn.Linear):
+                return blocks[0][0].in_features
+            return None
+        # NBDecoder: has .encoder (Sequential) starting with Linear
+        if hasattr(gd, "encoder") and isinstance(getattr(gd, "encoder"), nn.Sequential):
+            seq = gd.encoder
+            for m in seq:
+                if isinstance(m, nn.Linear):
+                    return m.in_features
+            return None
+        return None
+
+    def _maybe_concat_batch(self, latent: torch.Tensor, batch: torch.Tensor, padded: bool) -> torch.Tensor:
+        """
+        Concatenate batch covariates to the latent only if the decoder expects them.
+        This avoids shape mismatches at inference when loading a checkpointed decoder
+        that was trained without batch concatenation.
+        """
+        if self.gene_decoder is None or self.batch_dim is None:
+            return latent
+
+        expected_in = self._decoder_in_features()
+        last_dim = latent.size(-1)
+
+        # Prepare batch tensor to match latent shape
+        if latent.dim() == 2:
+            batch_var = batch.reshape(latent.shape[0], -1)
+        else:
+            batch_var = batch.reshape(latent.shape[0], latent.shape[1], -1)
+
+        # Decide whether to concatenate based on the decoder's input expectation
+        if expected_in is None:
+            # Fallback to previous behavior: concatenate for non-VCI decoders
+            return torch.cat([latent, batch_var], dim=-1)
+
+        if expected_in == last_dim:
+            # Decoder expects just the latent; do NOT concat
+            return latent
+        elif expected_in == last_dim + batch_var.size(-1):
+            # Decoder expects latent + batch covariates; concat
+            return torch.cat([latent, batch_var], dim=-1)
+        else:
+            # Mismatch: give a clear error message to guide the user
+            raise RuntimeError(
+                f"Decoder input dim mismatch: got latent size {last_dim}"
+                f" (batch_dim={batch_var.size(-1)}), but decoder expects {expected_in}."
+                " This usually means the checkpointed decoder was trained without"
+                " concatenating batch covariates, while predict is attempting to."
+            )
+
     def _build_networks(self):
         """
         Here we instantiate the actual GPT2-based model.
@@ -272,10 +340,8 @@ class PseudobulkPerturbationModel(PerturbationModel):
             # with torch.no_grad():
             #     latent_preds = pred.detach()  # Detach to prevent gradient flow back to main model
 
-            batch_var = batch["batch"].reshape(latent_preds.shape[0], latent_preds.shape[1], -1)
-            # concatenate on the last axis
-            if self.batch_dim is not None and not isinstance(self.gene_decoder, FinetuneVCICountsDecoder):
-                latent_preds = torch.cat([latent_preds, batch_var], dim=-1)
+            if not isinstance(self.gene_decoder, FinetuneVCICountsDecoder):
+                latent_preds = self._maybe_concat_batch(latent_preds, batch["batch"], padded=True)
 
             if isinstance(self.gene_decoder, NBDecoder):
                 mu, theta = self.gene_decoder(latent_preds)
@@ -319,7 +385,10 @@ class PseudobulkPerturbationModel(PerturbationModel):
                 gene_targets = batch["pert_cell_counts"].reshape_as(mu)
                 decoder_loss = nb_nll(gene_targets, mu, theta)
             else:
-                pert_cell_counts_preds = self.gene_decoder(latent_preds)  # verify this is automatically detached
+                # Match decoder input dims
+                if not isinstance(self.gene_decoder, FinetuneVCICountsDecoder):
+                    latent_preds = self._maybe_concat_batch(latent_preds, batch["batch"], padded=True)
+                pert_cell_counts_preds = self.gene_decoder(latent_preds)
 
                 # Get decoder predictions
                 pert_cell_counts_preds = pert_cell_counts_preds.reshape(-1, self.cell_sentence_len, self.gene_dim)
@@ -359,17 +428,14 @@ class PseudobulkPerturbationModel(PerturbationModel):
         basal_hvg = batch.get("ctrl_cell_counts", None)
 
         if self.gene_decoder is not None:
-            if latent_output.dim() == 2:
-                batch_var = batch["batch"].reshape(latent_output.shape[0], -1)
-            else:
-                batch_var = batch["batch"].reshape(latent_output.shape[0], latent_output.shape[1], -1)
-            # concatenate on the last axis
-            if self.batch_dim is not None and not isinstance(self.gene_decoder, FinetuneVCICountsDecoder):
-                latent_output = torch.cat([latent_output, batch_var], dim=-1)
             if isinstance(self.gene_decoder, NBDecoder):
+                # NB decoder already configured with latent_dim including batch if needed
                 mu, _ = self.gene_decoder(latent_output)
                 pert_cell_counts_preds = mu
             else:
+                # Only concat batch covariates if decoder expects them
+                if not isinstance(self.gene_decoder, FinetuneVCICountsDecoder):
+                    latent_output = self._maybe_concat_batch(latent_output, batch["batch"], padded=padded)
                 pert_cell_counts_preds = self.gene_decoder(latent_output)
             output_dict["pert_cell_counts_preds"] = pert_cell_counts_preds
 

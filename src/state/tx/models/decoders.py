@@ -113,6 +113,16 @@ class FinetuneVCICountsDecoder(nn.Module):
             # Register a dummy buffer so attributes exist
             self.missing_table = None
 
+        # Ensure the wrapped Finetune helper creates its own missing-table parameters
+        # prior to Lightning's checkpoint load. Otherwise the checkpoint will contain
+        # weights like `gene_decoder.finetune.missing_table.weight` that are absent
+        # from a freshly constructed module, triggering "unexpected key" errors.
+        try:
+            with torch.no_grad():
+                self.finetune.get_gene_embedding(self.genes)
+        except Exception as exc:
+            logger.debug(f"Deferred Finetune missing-table initialization failed: {exc}")
+
     def gene_dim(self):
         return len(self.genes)
 

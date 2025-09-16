@@ -216,6 +216,28 @@ class PerturbationModel(ABC, LightningModule):
         if self.gene_decoder_bool == False:
             self.gene_decoder = None
             return
+
+        # When finetuning with the pretrained VCI decoder, keep the existing
+        # FinetuneVCICountsDecoder instance. Overwriting it with a freshly
+        # constructed LatentToGeneDecoder would make the checkpoint weights
+        # incompatible and surface load_state_dict errors.
+        finetune_decoder_active = False
+        hparams = getattr(self, "hparams", None)
+        if hparams is not None:
+            if hasattr(hparams, "get"):
+                finetune_decoder_active = bool(hparams.get("finetune_vci_decoder", False))
+            else:
+                finetune_decoder_active = bool(getattr(hparams, "finetune_vci_decoder", False))
+        if not finetune_decoder_active:
+            finetune_decoder_active = bool(getattr(self, "finetune_vci_decoder", False))
+
+        if finetune_decoder_active:
+            # Preserve decoder_cfg for completeness but avoid rebuilding the module.
+            if "decoder_cfg" in checkpoint.get("hyper_parameters", {}):
+                self.decoder_cfg = checkpoint["hyper_parameters"]["decoder_cfg"]
+            logger.info("Finetune VCI decoder active; keeping existing decoder during checkpoint load")
+            return
+
         if not decoder_already_configured and "decoder_cfg" in checkpoint["hyper_parameters"]:
             self.decoder_cfg = checkpoint["hyper_parameters"]["decoder_cfg"]
             self.gene_decoder = LatentToGeneDecoder(**self.decoder_cfg)

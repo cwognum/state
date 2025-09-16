@@ -7,7 +7,7 @@ authors = [
     { name = "Abhinav Adduri", email = "abhinav.adduri@arcinstitute.org" },
     { name = "Yusuf Roohani", email = "yusuf.roohani@arcinstitute.org" },
     { name = "Noam Teyssier", email = "noam.teyssier@arcinstitute.org" },
-    { name = "Rajesh Ilango" },
+    { name = "Rajesh Ilango", email = "rilango@gmail.com" },
     { name = "Dhruv Gautam", email = "dhruvgautam@berkeley.edu" },
 ]
 requires-python = ">=3.10,<3.13"

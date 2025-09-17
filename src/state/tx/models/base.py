@@ -123,12 +123,12 @@ class PerturbationModel(ABC, LightningModule):
     Args:
         input_dim: Dimension of input features (genes or embeddings)
         hidden_dim: Hidden dimension for neural network layers
-        output_dim: Dimension of output (always gene space)
+        output_dim: Dimension of output (gene space or embedding space)
         pert_dim: Dimension of perturbation embeddings
         dropout: Dropout rate
         lr: Learning rate for optimizer
         loss_fn: Loss function ('mse' or custom nn.Module)
-        output_space: 'gene' or 'latent'
+        output_space: 'gene', 'all', or 'embedding'
     """
 
     def __init__(
@@ -174,6 +174,10 @@ class PerturbationModel(ABC, LightningModule):
 
         self.embed_key = embed_key
         self.output_space = output_space
+        if self.output_space not in {"embedding", "gene", "all"}:
+            raise ValueError(
+                f"Unsupported output_space '{self.output_space}'. Expected one of 'embedding', 'gene', or 'all'."
+            )
         self.batch_size = batch_size
         self.control_pert = control_pert
 
@@ -182,6 +186,18 @@ class PerturbationModel(ABC, LightningModule):
         self.dropout = dropout
         self.lr = lr
         self.loss_fn = get_loss_fn(loss_fn)
+
+        if self.output_space == "embedding":
+            self.gene_decoder_bool = False
+            self.decoder_cfg = None
+            # keep hyperparameters metadata consistent with the actual model state
+            try:
+                if hasattr(self, "hparams"):
+                    self.hparams["gene_decoder_bool"] = False  # type: ignore[index]
+                    self.hparams["decoder_cfg"] = None  # type: ignore[index]
+            except Exception:
+                pass
+
         self._build_decoder()
 
     def transfer_batch_to_device(self, batch, device, dataloader_idx: int):

@@ -23,7 +23,7 @@ class FinetuneVCICountsDecoder(nn.Module):
         config: Optional[str] = "/home/aadduri/vci_pretrain/vci_1.4.4/config.yaml",
         latent_dim: int = 1034,  # total input dim (cell emb + optional ds emb)
         read_depth: float = 4.0,
-        ds_emb_dim: int = 10,    # dataset embedding dim at the tail of input
+        ds_emb_dim: int = 10,  # dataset embedding dim at the tail of input
         hidden_dim: int = 512,
         dropout: float = 0.1,
         basal_residual: bool = False,
@@ -75,7 +75,7 @@ class FinetuneVCICountsDecoder(nn.Module):
             nn.Linear(128, len(self.genes)),
         )
 
-        self.binary_decoder = self.finetune.model.binary_decoder # type: ignore
+        self.binary_decoder = self.finetune.model.binary_decoder  # type: ignore
 
         # Validate that all requested genes exist in the pretrained checkpoint's embeddings
         pe = getattr(self.finetune, "protein_embeds", {})

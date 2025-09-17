@@ -15,7 +15,13 @@ log = logging.getLogger(__name__)
 
 
 class Finetune(nn.Module):
-    def __init__(self, cfg: Optional[OmegaConf] = None, learning_rate: float = 1e-4, read_depth: float = 4.0, train_binary_decoder: bool = False):
+    def __init__(
+        self,
+        cfg: Optional[OmegaConf] = None,
+        learning_rate: float = 1e-4,
+        read_depth: float = 4.0,
+        train_binary_decoder: bool = False,
+    ):
         """
         Helper module that loads a pretrained SE/VCI checkpoint and exposes:
           - get_gene_embedding(genes): returns gene/task embeddings with differentiable
@@ -45,7 +51,7 @@ class Finetune(nn.Module):
         self.missing_table: Optional[nn.Embedding] = None
         self._last_missing_count: int = 0
         self._last_missing_dim: int = 0
-        
+
         # Cache present masks and index maps per gene set
         self._present_mask_cache: Dict[Tuple[str, ...], torch.Tensor] = {}
         self._missing_index_map_cache: Dict[Tuple[str, ...], torch.Tensor] = {}
@@ -85,9 +91,7 @@ class Finetune(nn.Module):
         self._vci_conf = cfg_to_use
 
         # Load model; allow passing cfg to constructor like inference
-        self.model = StateEmbeddingModel.load_from_checkpoint(
-            checkpoint, dropout=0.0, strict=False, cfg=self._vci_conf
-        )
+        self.model = StateEmbeddingModel.load_from_checkpoint(checkpoint, dropout=0.0, strict=False, cfg=self._vci_conf)
         self.device = self.model.device  # type: ignore
 
         # Try to extract packaged protein embeddings from checkpoint

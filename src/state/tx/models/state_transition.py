@@ -216,9 +216,7 @@ class StateTransitionPerturbationModel(PerturbationModel):
         self.batch_predictor_num_classes: Optional[int] = batch_dim if self.batch_predictor else None
         if self.batch_predictor:
             if self.batch_predictor_num_classes is None:
-                raise ValueError(
-                    "batch_predictor=True requires a valid `batch_dim` (number of batch classes)."
-                )
+                raise ValueError("batch_predictor=True requires a valid `batch_dim` (number of batch classes).")
             # A single learnable batch token that is added to each position
             self.batch_token = nn.Parameter(torch.randn(1, 1, self.hidden_dim))
             # Simple per-token classifier from transformer hidden to batch classes

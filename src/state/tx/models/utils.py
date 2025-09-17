@@ -153,16 +153,12 @@ def apply_lora(model: PreTrainedModel, backbone_key: str, lora_cfg: dict | None)
         return model
 
     if LoraConfig is None or get_peft_model is None:
-        raise ImportError(
-            "peft is not installed but `lora.enable` is True. Add `peft` to dependencies."
-        )
+        raise ImportError("peft is not installed but `lora.enable` is True. Add `peft` to dependencies.")
 
     target = lora_cfg.get("target", "auto")
     adapt_mlp = bool(lora_cfg.get("adapt_mlp", False))
     target_modules = (
-        lora_cfg.get("target_modules")
-        if target != "auto"
-        else _default_lora_targets(backbone_key, adapt_mlp)
+        lora_cfg.get("target_modules") if target != "auto" else _default_lora_targets(backbone_key, adapt_mlp)
     )
 
     # Build PEFT LoRA config

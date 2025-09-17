@@ -108,6 +108,11 @@ def run_tx_train(cfg: DictConfig):
     elif cfg["model"]["name"].lower() == "scvi":
         cfg["data"]["kwargs"]["transform"] = None
 
+    output_space = cfg["data"]["kwargs"].get("output_space", "gene")
+    assert output_space in {"embedding", "gene", "all"}, (
+        f"data.kwargs.output_space must be one of 'embedding', 'gene', or 'all'; got {output_space!r}"
+    )
+
     data_module: PerturbationDataModule = get_datamodule(
         cfg["data"]["name"],
         cfg["data"]["kwargs"],
@@ -125,23 +130,27 @@ def run_tx_train(cfg: DictConfig):
     print("batch size:", dl.batch_size)
 
     var_dims = data_module.get_var_dims()  # {"gene_dim": …, "hvg_dim": …}
-    if cfg["data"]["kwargs"]["output_space"] == "gene":
+    if output_space == "gene":
         gene_dim = var_dims.get("hvg_dim", 2000)  # fallback if key missing
     else:
         gene_dim = var_dims.get("gene_dim", 2000)  # fallback if key missing
     latent_dim = var_dims["output_dim"]  # same as model.output_dim
     hidden_dims = cfg["model"]["kwargs"].get("decoder_hidden_dims", [1024, 1024, 512])
 
-    decoder_cfg = dict(
-        latent_dim=latent_dim,
-        gene_dim=gene_dim,
-        hidden_dims=hidden_dims,
-        dropout=cfg["model"]["kwargs"].get("decoder_dropout", 0.1),
-        residual_decoder=cfg["model"]["kwargs"].get("residual_decoder", False),
-    )
+    if output_space in {"gene", "all"}:
+        decoder_cfg = dict(
+            latent_dim=latent_dim,
+            gene_dim=gene_dim,
+            hidden_dims=hidden_dims,
+            dropout=cfg["model"]["kwargs"].get("decoder_dropout", 0.1),
+            residual_decoder=cfg["model"]["kwargs"].get("residual_decoder", False),
+        )
 
-    # tuck it into the kwargs that will reach the LightningModule
-    cfg["model"]["kwargs"]["decoder_cfg"] = decoder_cfg
+        # tuck it into the kwargs that will reach the LightningModule
+        cfg["model"]["kwargs"]["decoder_cfg"] = decoder_cfg
+    else:
+        cfg["model"]["kwargs"].pop("decoder_cfg", None)
+        cfg["model"]["kwargs"]["gene_decoder_bool"] = False
 
     # Save the onehot maps as pickle files instead of storing in config
     cell_type_onehot_map_path = join(run_output_dir, "cell_type_onehot_map.pkl")
